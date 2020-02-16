@@ -1,21 +1,28 @@
 import torch
 from torch.utils.data import TensorDataset, DataLoader
 from utils import convent_feature
+import time
+import random
 from tqdm import tqdm
+from torch.utils.data.sampler import WeightedRandomSampler, RandomSampler
 from transformers import BertForSequenceClassification, BertTokenizer, BertConfig
 from transformers import AdamW, get_linear_schedule_with_warmup
 import pandas as pd
 import os
 import logging
 
+SUM = 10000
 EPOCHS = 4
 BATCH_SIZE = 16
 MAX_LEN = 200
 LR = 5e-5
 WARMUP_STEPS = 100
-T_TOTAL = 10000 // BATCH_SIZE
+T_TOTAL = SUM // BATCH_SIZE
 DEVICE = 'cuda'
-PRITN_STEPS = 20
+PRINT_STEPS = 20
+TRAIN_PROPORTION = 0.9
+RESAMPLE = True
+
 os.environ['CUDA_VISIBLE_DEVICES'] = '5'
 logging.basicConfig(level=logging.INFO)
 
@@ -32,15 +39,23 @@ def load_feature(features, labels=None):
     return dataset
 
 
-def load_data(tokenizer, max_seq):
-    train = pd.read_csv("./data/train_new.csv", sep="\t")
-    # test = pd.read_csv("./data/test_new.csv")
-    train_words = train['comment'].values
-    train_labels = train['label'].astype(int).values
+def load_train_data(tokenizer, max_seq):
+    train_file = pd.read_csv("./data/train_new.csv", sep="\t")
+    train_words = train_file['comment'].values
+    train_labels = train_file['label'].astype(int).values
 
     train_feature = convent_feature(train_words, tokenizer, max_seq)
     train_dataset = load_feature(train_feature, train_labels)
     return train_dataset
+
+
+def load_test_data(tokenizer, max_seq):
+    test_file = pd.read_csv("./data/test_new.csv")
+    test_words = test_file['comment'].values
+
+    test_feature = convent_feature(test_words, tokenizer, max_seq)
+    test_dataset = load_feature(test_feature)
+    return test_dataset
 
 
 def batch_accuracy(pre, label):
@@ -51,8 +66,25 @@ def batch_accuracy(pre, label):
     return accuracy
 
 
+def data_split(dataset, split):
+    # indexs =list(range(SUM))
+    # random.shuffle(indexs)
+    # dataset = [dataset[i] for i in indexs]
+    return TensorDataset(*dataset[:split]), TensorDataset(*dataset[split:])
+
+
 def train(model, dataset):
-    data_loader = DataLoader(dataset=dataset, batch_size=BATCH_SIZE, shuffle=True)
+    train_data, dev_data = data_split(dataset, int(TRAIN_PROPORTION * SUM))
+    # print(len(train_data))
+    train_weight = [3.0 if data[-1] == 1 else 1.0 for data in train_data]
+    if RESAMPLE:
+        sample = WeightedRandomSampler(train_weight, num_samples=SUM)
+    else:
+        sample = RandomSampler(train_data)
+    train_loader = DataLoader(dataset=train_data, sampler=sample, batch_size=BATCH_SIZE)
+    dev_loader = DataLoader(dataset=dev_data, batch_size=BATCH_SIZE * 4, shuffle=False)
+    # print(dev_loader)
+
     # optimizer = AdamW(model.parameters(), lr=LR, correct_bias=False)
     # scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=WARMUP_STEPS, num_training_steps=T_TOTAL)
     no_decay = ["bias", "LayerNorm.weight"]
@@ -70,45 +102,105 @@ def train(model, dataset):
 
     model.train()
     model.to(device=DEVICE)
+    best_f1 = 0.0
+    t_loss = t_acc = 0
     for _ in range(EPOCHS):
-        epoch_iterator = tqdm(data_loader)
-        t_loss = t_acc = 0.0
-        for step, bath in enumerate(epoch_iterator):
-            bath = tuple(t.to(DEVICE) for t in bath)
-            inputs = {'input_ids': bath[0], "attention_mask": bath[1], "token_type_ids": bath[2], "labels": bath[3]}
+        epoch_iterator = tqdm(train_loader)
+        for step, batch in enumerate(epoch_iterator):
+            batch = tuple(t.to(DEVICE) for t in batch)
+            inputs = {'input_ids': batch[0], "attention_mask": batch[1], "token_type_ids": batch[2],
+                      "labels": batch[3]}
 
             model.zero_grad()
-            # optimizer.zero_grad()
             outputs = model(**inputs)
             loss, logits = outputs[:2]
             loss.backward()
-            scheduler.step()  # Update learning rate schedule
             optimizer.step()
-            # model.zero_grad()
-
+            scheduler.step()  # Update learning rate schedule
             t_loss += loss
             t_acc += batch_accuracy(logits, inputs["labels"])
-            if (step + 1) % PRITN_STEPS == 0:
-                t_loss /= PRITN_STEPS
-                t_acc /= PRITN_STEPS
-                print('\n' + '#'*100)
-                print(f'\tepoch:{_ + 1} | step: {step + 1} | acc: {t_acc} | loss: {t_loss}')
-                print('#' * 100)
-                t_loss = t_acc = 0.0
-                pre = logits.argmax(1)
-                print(pre)
-                print(inputs["labels"])
+
+            if (step + 1) % PRINT_STEPS == 0:
+                # print('\n', f'loss:{t_loss / (step + 1)} | acc: {t_acc / (step + 1)}')
+                # print(logits.argmax(1))
+                # print(inputs["labels"])
+                precision, recall, f1, acc, loss = eval(model, dev_loader)
+                print('\n' + "#"*100)
+                logging.info(f'\tprecision:{precision} | recall:{recall} | F1:{f1}')
+                logging.info(f'\tacc:{acc} | loss:{loss}')
+                print('\n' + "#" * 100)
+                if f1 > best_f1:
+                    torch.save(model.state_dict(), './outputs/bert_cla_{}.ckpt')
+                    logging.info("GEST THE BETTER MODEL")
+                    best_f1 = f1
+    return best_f1
+
+def eval(model, data_loader):
+    logging.info("\n****EVALUATE START****")
+    t_loss = step = 0
+    pre = []
+    labels = []
+    model.eval()
+    model.cuda()
+    s_time = time.time()
+    for step, batch in enumerate(data_loader):
+        with torch.no_grad():
+            batch = tuple(t.to(DEVICE) for t in batch)
+            inputs = {'input_ids': batch[0], "attention_mask": batch[1], "token_type_ids": batch[2],
+                      "labels": batch[3]}
+            outputs = model(**inputs)
+        loss, logits = outputs[:2]
+        t_loss += loss
+        pre.append(logits.argmax(1)), labels.append(inputs['labels'])
+    pre, labels = torch.cat(pre), torch.cat(labels)
+    t_time = time.time()
+    print(t_time - s_time)
+    TP = ((pre == 1) & (labels == 1)).sum().item()
+    TN = ((pre == 0) & (labels == 0)).sum().item()
+    FN = ((pre == 0) & (labels == 1)).sum().item()
+    FP = ((pre == 1) & (labels == 0)).sum().item()
+
+    eci = 1e-10
+    p, r = TP / float(TP + FP + eci), TP / float(TP + FN + eci)
+    f1, acc = 2 * r * p / (p + r + eci), (TP + TN) / (TP + TN + FP + FN)
+    logging.info("****EVALUATE END****")
+    print(time.time() - t_time)
+    return p, r, f1, acc, t_loss / (step + 1)
+
+
+def test(path, model, dataset):
+    data_loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
+    model.load_state_dict(torch.load(path))
+    logging.info("****TEST START****")
+    labels = []
+    model.eval()
+    model.cuda()
+    for step, batch in enumerate(tqdm(data_loader)):
+        with torch.no_grad():
+            batch = tuple(t.to(DEVICE) for t in batch)
+            inputs = {'input_ids': batch[0], "attention_mask": batch[1], "token_type_ids": batch[2]}
+            outputs = model(**inputs)
+        logits = outputs[0]
+        labels.append(torch.argmax(logits, 1))
+    labels = torch.cat(labels).cpu().numpy().tolist()
+    logging.info("****TEST END****")
+    return labels
 
 
 if __name__ == '__main__':
+    # model_path = 'D:\\model\\chinese_wwm_ext_pytorch\\'
     model_path = '../model/chinese_wwm_ext_pytorch/'
     tokenizer = BertTokenizer.from_pretrained(model_path + 'vocab.txt')
     config = BertConfig.from_pretrained(model_path)
     config.num_labels = 2
     model = BertForSequenceClassification.from_pretrained(model_path, config=config)
 
-    train_dataset = load_data(tokenizer, max_seq=MAX_LEN)
-    train(model, train_dataset)
+    train_dataset = load_train_data(tokenizer, max_seq=MAX_LEN)
+    sorce = train(model, train_dataset)
 
-
-
+    test_file = pd.read_csv("./data/test_new.csv")
+    print(test_file['id'][:10])
+    test_dataset = load_test_data(tokenizer, max_seq=MAX_LEN)
+    test_file['flag'] = test('./outputs/bert_cla.ckpt', model, test_dataset)
+    print(test_file['flag'][:10])
+    test_file[['id', 'flag']].to_csv('./result/my_bert_{}.csv'.format('1'), index=False)
