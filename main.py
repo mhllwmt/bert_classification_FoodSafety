@@ -143,6 +143,7 @@ if __name__ == "__main__":
             # print('list', text_list)
             # print('tensor', text_tensor)
             # print('tensor.shape', text_tensor.shape)
+
             outputs = model(text_tensor, labels=None)
 
             print(outputs[0])

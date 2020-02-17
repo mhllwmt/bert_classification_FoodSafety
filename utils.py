@@ -1,5 +1,5 @@
 class InputFeatures(object):
-    """A single set of features of data."""
+    """A single set of features of data"""
 
     def __init__(self, input_ids, input_mask, segment_ids):
         self.input_ids = input_ids
