@@ -16,7 +16,7 @@ SUM = 10000
 EPOCHS = 3
 BATCH_SIZE = 16
 MAX_LEN = 200
-LR = 1e-5
+LR = 5e-5
 WARMUP_STEPS = 100
 T_TOTAL = SUM // BATCH_SIZE
 DEVICE = 'cuda'
@@ -24,7 +24,7 @@ PRINT_STEPS = 20
 TRAIN_PROPORTION = 0.9
 EARLY_STOP = 6 # loss not change stop
 RESAMPLE = True
-WEIGHT = 3.0
+WEIGHT = 2.0
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '7'
 logging.basicConfig(level=logging.INFO)
@@ -85,7 +85,7 @@ def train(model, train_data, dev_data, fold):
     else:
         sample = RandomSampler(train_data)
     train_loader = DataLoader(dataset=train_data, sampler=sample, batch_size=BATCH_SIZE)
-    dev_loader = DataLoader(dataset=dev_data, batch_size=BATCH_SIZE * 4, shuffle=False)
+    dev_loader = DataLoader(dataset=dev_data, batch_size=BATCH_SIZE, shuffle=False)
     # print(dev_loader)
 
     # optimizer = AdamW(model.parameters(), lr=LR, correct_bias=False)
@@ -207,7 +207,7 @@ def test(path, model, dataset):
 
 
 if __name__ == '__main__':
-    # model_path = 'D:\\model\\chinese_wwm_ext_pytorch\\'
+    # model_path = 'D:\\model\\chinese_wwm_ext_pytorch\'
     model_path = '/home/mhl/model/chinese_wwm_ext_pytorch/'
     tokenizer = BertTokenizer.from_pretrained(model_path + 'vocab.txt')
     config = BertConfig.from_pretrained(model_path)
@@ -219,22 +219,23 @@ if __name__ == '__main__':
 
     max_sor = 0
     flag = torch.zeros(len(test_file), 2)
-    kfold = StratifiedKFold(n_splits=5, shuffle=True)
-    # for fold, (train_index, valid_index) in enumerate(kfold.split(features, labels)):
-    #     train_x = [features[i] for i in train_index]
-    #     train_y = labels[train_index]
-    #     train_dataset = load_feature(train_x, train_y)
-    #     valid_x = [features[i] for i in valid_index]
-    #     valid_y = labels[valid_index]
-    #     valid_dataset = load_feature(valid_x, valid_y)
-    #
-    #     model = BertForSequenceClassification.from_pretrained(model_path, config=config)
-    #     sorce = train(model, train_dataset, valid_dataset, fold)
-    #     flag += test('./outputs/bert_cla_{}_{:.5f}.ckpt'.format(fold, sorce), model, test_dataset)
-    #     max_sor = max(sorce, max_sor)
-    fold, sorce = 1, 0.95008
-    model = BertForSequenceClassification.from_pretrained(model_path, config=config)
-    flag += test('./outputs/bert_cla_{}_{:.5f}.ckpt'.format(fold, sorce), model, test_dataset)
+    kfold = StratifiedKFold(n_splits=10, shuffle=True)
+    for fold, (train_index, valid_index) in enumerate(kfold.split(features, labels)):
+        train_x = [features[i] for i in train_index]
+        train_y = labels[train_index]
+        train_dataset = load_feature(train_x, train_y)
+        valid_x = [features[i] for i in valid_index]
+        valid_y = labels[valid_index]
+        valid_dataset = load_feature(valid_x, valid_y)
+
+        model = BertForSequenceClassification.from_pretrained(model_path, config=config)
+        sorce = train(model, train_dataset, valid_dataset, fold)
+        flag += test('./outputs/bert_cla_{}_{:.5f}.ckpt'.format(fold, sorce), model, test_dataset)
+        os.remove('./outputs/bert_cla_{}_{:.5f}.ckpt'.format(fold, sorce))
+        max_sor = max(sorce, max_sor)
+    # fold, sorce = 1, 0.95008
+    # model = BertForSequenceClassification.from_pretrained(model_path, config=config)
+    # flag += test('./outputs/bert_cla_{}_{:.5f}.ckpt'.format(fold, sorce), model, test_dataset)
     test_file['flag'] = flag.argmax(dim=1).cpu().numpy().tolist()
     test_file[['id', 'flag']].to_csv('./result/my_bert_{:.5f}.csv'.format(max_sor), index=False)
 
